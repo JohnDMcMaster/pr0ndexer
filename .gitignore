@@ -1,0 +1,11 @@
+*.pdf
+env.sh
+*.bin
+*.elf
+*.hex
+*.list
+*.o
+*.srec
+*~
+*.d
+
