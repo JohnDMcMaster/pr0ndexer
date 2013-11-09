@@ -348,7 +348,9 @@ void rx_char(uint8_t c) {
         gpio_toggle(GPIOC, GPIO9);
         
         //Not the right size? drop it
-        if (g_rx_n == sizeof(g_rx_buff)) {
+        if (g_rx_n != sizeof(g_rx_buff)) {
+            dbg("Drop packet: got %d / %d packet bytes", g_rx_n, sizeof(g_rx_buff));
+        } else {
             gpio_toggle(GPIOC, GPIO9);
             process_command();
         }
