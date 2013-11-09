@@ -1,6 +1,26 @@
 /*
+Relavent documents:
+-UM0919 User Manual STM32VLDISCOVERY STM32 value line Discovery 
+    24 pages
+    Details on crystals used, physical board layout, etc
+    CD00267113.pdf
+-Chip reference manual
+    Details on package pinout
+    CD00251732.pdf
+-RM0041 Reference manual STM32F100xx advanced ARM-based 32-bit MCUs
+    Details on peripherals like the USARTs
+    http://www.st.com/web/en/resource/technical/document/reference_manual/CD00246267.pdf
+-Cortex M3 manual
+    Details on CPU instructions
+        384 pages
+    Does not contain information on peripherals
+    http://infocenter.arm.com/help/topic/com.arm.doc.ddi0337e/DDI0337E_cortex_m3_r1p1_trm.pdf
+
 USART1 TX: PA9 
-USART1 RX: PA10 
+USART1 RX: PA10
+USART_CR1: RM0041 pg 611
+USART_CR2: RM0041 pg 613
+USART_CR3: RM0041 pg 614 
 */
 
 /*
@@ -44,7 +64,14 @@ sent, an END character is then transmitted."
 #include <stdio.h>
 #include <unistd.h>
 
-#if 1
+/*
+WARNING WARNING WARNING
+Even with the UART buffering, using the serial port to TX (printf) for some reason seems to still
+cause noticible step impact
+Some of this could be mitigated by switching to timer (which is what really should use)
+but regardless be warned...
+*/
+#if 0
 #define dbg(x, ...)     printf("DBG %s:%d: " x "\r\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #else
 #define dbg(...)
@@ -108,6 +135,9 @@ bool g_escape;
 struct ring output_ring;
 uint8_t output_ring_buffer[BUFFER_SIZE];
 
+struct ring input_ring;
+uint8_t input_ring_buffer[BUFFER_SIZE];
+
 #define USART_CONSOLE       USART1
 
 /******************************************************************************
@@ -135,6 +165,8 @@ static void ring_init(struct ring *ring, uint8_t *buf, ring_size_t size);
 //static int32_t ring_write(struct ring *ring, uint8_t *data, ring_size_t size);
 //static int32_t ring_read_ch(struct ring *ring, uint8_t *ch);
 //static int32_t ring_read(struct ring *ring, uint8_t *data, ring_size_t size);
+
+#include "ring.c"
 
 uint8_t checksum(const uint8_t *data, size_t data_size) {
     uint8_t ret = 0;
@@ -193,6 +225,7 @@ static void usart_setup(void)
 {
 	/* Initialize output ring buffer. */
 	ring_init(&output_ring, output_ring_buffer, BUFFER_SIZE);
+	ring_init(&input_ring, input_ring_buffer, BUFFER_SIZE);
 	
 	/* Enable the USART1 interrupt. */
 	nvic_enable_irq(NVIC_USART1_IRQ);
@@ -216,6 +249,9 @@ static void usart_setup(void)
     usart_set_parity(USART1, USART_PARITY_NONE);
     usart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);
 
+	/* Enable USART1 Receive interrupt. */
+	USART_CR1(USART1) |= USART_CR1_RXNEIE;
+	
     /* Finally enable the USART. */
     usart_enable(USART1);
 }
@@ -239,76 +275,30 @@ void usart_enable_rx_interrupt(uint32_t usart);
 void usart_disable_rx_interrupt(uint32_t usart);
 */
 
+#define toggle_blue()   gpio_toggle(GPIOC, GPIO8)
+#define toggle_green()   gpio_toggle(GPIOC, GPIO9)
 
-void ring_init(struct ring *ring, uint8_t *buf, ring_size_t size)
-{
-	ring->data = buf;
-	ring->size = size;
-	ring->begin = 0;
-	ring->end = 0;
-}
+void usart1_isr(void) {
+    toggle_blue();
 
-static int32_t ring_write_ch(struct ring *ring, uint8_t ch)
-{
-	if (((ring->end + 1) % ring->size) != ring->begin) {
-		ring->data[ring->end++] = ch;
-		ring->end %= ring->size;
-		return (uint32_t)ch;
-	}
-
-	return -1;
-}
-
-static int32_t ring_write(struct ring *ring, uint8_t *data, ring_size_t size)
-{
-	int32_t i;
-
-	for (i = 0; i < size; i++) {
-		if (ring_write_ch(ring, data[i]) < 0)
-			return -i;
-	}
-
-	return i;
-}
-
-static int32_t ring_read_ch(struct ring *ring, uint8_t *ch)
-{
-	int32_t ret = -1;
-
-	if (ring->begin != ring->end) {
-		ret = ring->data[ring->begin++];
-		ring->begin %= ring->size;
-		if (ch)
-			*ch = ret;
-	}
-
-	return ret;
-}
-
-/* Not used!
-static int32_t ring_read(struct ring *ring, uint8_t *data, ring_size_t size)
-{
-	int32_t i;
-
-	for (i = 0; i < size; i++) {
-		if (ring_read_ch(ring, data + i) < 0)
-			return i;
-	}
-
-	return -i;
-}
-*/
-void usart1_isr(void)
-{
 	/* Check if we were called because of RXNE. */
+	/*
+    Bit 5 RXNEIE: RXNE interrupt enable
+    This bit is set and cleared by software.
+    0: Interrupt is inhibited
+    1: A USART interrupt is generated whenever ORE=1 or RXNE=1 in the USART_SR register
+	
+	whats the point of checking if the interrupt is enabled if one is active?
+	*/
 	if (((USART_CR1(USART1) & USART_CR1_RXNEIE) != 0) &&
 	    ((USART_SR(USART1) & USART_SR_RXNE) != 0)) {
-
+        toggle_green();
+        
 		/* Indicate that we got data. */
 		//gpio_toggle(GPIOC, GPIO12);
 
 		/* Retrieve the data from the peripheral. */
-		ring_write_ch(&output_ring, usart_recv(USART1));
+		ring_write_ch(&input_ring, usart_recv(USART1));
 
 		/* Enable transmit interrupt so it sends back the data. */
 		USART_CR1(USART1) |= USART_CR1_TXEIE;
@@ -502,14 +492,13 @@ void rx_char(uint8_t c) {
         g_escape = false;
     } else if (c == SLIP_END) {
         dbg("end RX");
-        //green led
-        gpio_toggle(GPIOC, GPIO9);
+        //toggle_green();
         
         //Not the right size? drop it
         if (g_rx_n != sizeof(g_rx_buff)) {
             dbg("Drop packet: got %d / %d packet bytes", g_rx_n, sizeof(g_rx_buff));
         } else {
-            gpio_toggle(GPIOC, GPIO9);
+            toggle_green();
             process_command();
         }
         g_rx_n = 0;
@@ -614,11 +603,25 @@ int main(void) {
         //void usart_wait_recv_ready(uint32_t usart)
         //Wait until the data is ready to be received
         //while ((USART_SR(usart) & USART_SR_RXNE) == 0);
+        
+#if 0
         if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
             //blue led
-            gpio_toggle(GPIOC, GPIO8);
-                rx_char(usart_recv_blocking(USART1));
+            toggle_blue();
+            rx_char(usart_recv_blocking(USART1));
         }
+#else
+        {
+            //FIXME: ISR race conditions
+            int32_t c = ring_read_ch(&input_ring, NULL);
+            if (c >= 0) {
+                //toggle_blue();
+                rx_char(c);
+            }
+        }
+#endif
+
+
         
         for (unsigned int i = 0; i < N_AXES; ++i) {
             axis_t *axis = &g_axes[i];
