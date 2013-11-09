@@ -38,13 +38,18 @@ sent, an END character is then transmitted."
 #define SLIP_END        192
 #define SLIP_ESC        219
 
-
 #include <libopencm3/stm32/f1/rcc.h>
 #include <libopencm3/stm32/f1/gpio.h>
 #include <libopencm3/stm32/usart.h>
 #include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
+
+#if 1
+#define dbg(x, ...)     printf("DBG %s:%d: " x "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#else
+#define dbg(...)
+#endif
 
 typedef struct {
     /*
@@ -67,10 +72,34 @@ typedef struct {
     uint32_t value;
 } __attribute__((packed)) packet_t;
 
+typedef struct {
+    /*
+    Remaining steps
+    All pins are initialized to 0
+    Then go through high step for one cycle and then low step
+    */
+    int32_t step;
+    //half step delay
+    unsigned int hstep_dly;
+    
+    uint32_t      step_gpioport;
+    uint32_t      step_gpios;
+
+    uint32_t      dir_gpioport;
+    uint32_t      dir_gpios;
+} axis_t;
+
+
 //A packet is invalid if it doesn't end by the time buffer is consumed
 static uint8_t g_rx_buff[sizeof(packet_t)];
-//Negative value indicates no packet is in progress
-int g_rx_n;
+//large value indicates no packet is in progress
+unsigned int g_rx_n;
+//Last received sequence number of 0x100 if never
+#define SEQ_NEVER       0x100
+unsigned int g_seq_n;
+axis_t g_axes[3];
+#define N_AXES      3
+bool g_escape;
 
 uint8_t checksum(const uint8_t *data, size_t data_size) {
     uint8_t ret = 0;
@@ -116,9 +145,10 @@ static void usart_setup(void)
 
 static void gpio_setup(void)
 {
-    /* Set GPIO9 (in GPIO port C) to 'output push-pull'. [LED] */
+    //blue lower right
     gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
               GPIO_CNF_OUTPUT_PUSHPULL, GPIO8);
+    //green
     gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
               GPIO_CNF_OUTPUT_PUSHPULL, GPIO9);
 }
@@ -148,82 +178,283 @@ void usart_disable_rx_interrupt(uint32_t usart);
 //for printf
 int _write(int file, char *ptr, int len)
 {
-	int i;
+    int i;
 
-	if (file == STDOUT_FILENO || file == STDERR_FILENO) {
-		for (i = 0; i < len; i++) {
-			if (ptr[i] == '\n') {
-				usart_send_blocking(USART_CONSOLE, '\r');
-			}
-			usart_send_blocking(USART_CONSOLE, ptr[i]);
-		}
-		return i;
-	}
-	errno = EIO;
-	return -1;
+    if (file == STDOUT_FILENO || file == STDERR_FILENO) {
+        for (i = 0; i < len; i++) {
+            if (ptr[i] == '\n') {
+                usart_send_blocking(USART_CONSOLE, '\r');
+            }
+            usart_send_blocking(USART_CONSOLE, ptr[i]);
+        }
+        return i;
+    }
+    errno = EIO;
+    return -1;
 }
+
+void service_axis(axis_t *axis) {
+    int steps;
+    
+    if (!axis->step) {
+        return;
+    }
+    
+    if (axis->step > 0) {
+        steps = axis->step > 10 ? 10 : axis->step;
+        axis->step -= steps;
+        gpio_clear(axis->dir_gpioport, axis->dir_gpios);
+    } else {
+        steps = axis->step < -10 ? 10 : -axis->step;
+        axis->step += steps;
+        gpio_set(axis->dir_gpioport, axis->dir_gpios);
+    }
+    
+    //In the future will want to do some sort of timer based precision timing
+    //in the meantime this will suffice
+    //only do a bit a at a time to keep the serial port responsive 
+    //"Factory trimmed 8 MHz RC oscillator and 40 kHz for RTC and watchdog."
+    //no idea what I was stepping at before...start with this and speed it up from there
+    for (int j = 0; j < steps; ++j) {
+        //Delays of 8000 (16000 total) give about 370 steps/second
+        //skips at 800, didn't even move
+        //2000 was pretty smooth and no slipping observed
+        //2200 seemed pretty smooth
+        //3000 was more vibration
+        //1500 seems more than 2000
+        //1000 skips
+        
+        gpio_set(axis->step_gpioport, axis->step_gpios);
+        for (int i = 0; i < axis->hstep_dly; i++) {
+            __asm__("NOP");
+        }
+        gpio_clear(axis->step_gpioport, axis->step_gpios);
+        for (int i = 0; i < axis->hstep_dly; i++) {
+            __asm__("NOP");
+        }
+    }
+}
+
+#define XYZ_STATUS         0x00
+#define XYZ_CONTROL     0x01     
+//Set the step register to value (2's compliment)
+#define XYZ_STEP_SET     0x02
+//Adjust the step register by argument
+#define XYZ_STEP_ADD     0x03
+//Adjust the step register by argument
+//#define XYZ_STEP_ADD    0x04
+//Minimum velocity in steps/second     
+#define XYZ_VELMIN         0x05
+//Maximum velocity in steps/second
+#define XYZ_VELMAX         0x06
+//Acceleration/decceleration in steps/second**2 
+#define XYZ_ACL         0x07
+#define XYZ_HSTEP_DLY   0x08
+
+#define OPCODE_WRITE    0x80
+
+#define PACKET_INVALID 0xFF
+
+void axis_process_command(axis_t *axis, const packet_t *packet) {
+    uint8_t reg = packet->opcode & 0x1F;
+    
+    if (packet->opcode & OPCODE_WRITE) {
+        switch (reg) {
+        case XYZ_STEP_SET:
+            axis->step = (int32_t)packet->value;
+            dbg("axis set step: %d", (int)axis->step);
+            break;
+        case XYZ_STEP_ADD:
+            axis->step += (int32_t)packet->value;
+            dbg("axis adjust step: %d", (int)axis->step);
+            break;
+        case XYZ_HSTEP_DLY:
+            axis->hstep_dly = packet->value;
+            dbg("axis adjust hstep dly: %d", axis->hstep_dly);
+            break;
+        default:
+            dbg("Drop packet: unknown axis reg 0x%02X (opcode 0x%02X)", reg, packet->opcode);
+        }
+    } else {
+        dbg("Drop packet: FIXME read not implemented, reg 0x%02X (opcode 0x%02X)", reg, packet->opcode);
+    }
+}
+
+void process_command(void) {
+    const packet_t *packet = (const packet_t *)&g_rx_buff;
+    uint8_t computed_checksum;
+    
+    //Verify checksum
+    computed_checksum = checksum(g_rx_buff + 1, sizeof(g_rx_buff) - 1);
+    if (packet->checksum != computed_checksum) {
+        //nope!
+        dbg("Drop packet: checksum mismatch, got: 0x%02X, compute: 0x%02X", packet->checksum, computed_checksum);
+        return;
+    }
+    /*
+    //Retransmit?
+    if (packet->seq == g_seq_num && g_seq_num != SEQ_NEVER) {
+        //TODO: send ack
+        return;
+    }
+    g_seq_num = packet->seq;
+    */
+    
+    //0x20         X block
+    //0x40         Y block
+    //0x60         Z block
+    if ((packet->opcode & 0x60) == 0x20) {
+        axis_process_command(&g_axes[0], packet);
+    } else if ((packet->opcode & 0x60) == 0x40) {
+        axis_process_command(&g_axes[1], packet);
+    } else if ((packet->opcode & 0x60) == 0x60) {
+        axis_process_command(&g_axes[2], packet);
+    } else {
+        dbg("unrecognized block, opcode: 0x%02X", packet->opcode);
+        /*
+        switch (opcode) {
+        case OPCODE_
+        }
+        */
+    }
+}
+
+void rx_char(uint8_t c) {
+    dbg("RX char 0x%02X, cur size: %d", c, g_rx_n);
+    //usart_send_blocking(USART1, c);
+    //printf("Force RX: 0x%04X\n", c);
+    if (g_escape) {
+        //enough room?
+        if (g_rx_n >= sizeof(g_rx_buff)) {
+            dbg("overflow");
+            g_rx_n = PACKET_INVALID;
+        } else {
+            //If a data byte is the same code as END character, a two byte sequence of
+            //ESC and octal 334 (decimal 220) is sent instead.  
+            if (c == 220) {
+                g_rx_buff[g_rx_n++] = SLIP_END;
+            //If it the same as an ESC character, an two byte sequence of ESC and octal 335 (decimal
+            //221) is sent instead
+            } else if (c == 221) {
+                g_rx_buff[g_rx_n++] = SLIP_ESC;
+            } else {
+                g_rx_n = PACKET_INVALID;
+            }
+        }
+        g_escape = false;
+    } else if (c == SLIP_END) {
+        dbg("end RX");
+        //green led
+        gpio_toggle(GPIOC, GPIO9);
+        
+        //Not the right size? drop it
+        if (g_rx_n == sizeof(g_rx_buff)) {
+            gpio_toggle(GPIOC, GPIO9);
+            process_command();
+        }
+        g_rx_n = 0;
+        g_escape = false;
+    } else if (c == SLIP_ESC) {
+        dbg("escape RX");
+        g_escape = true;
+    //Ordinary character
+    } else {
+        //enough room?
+        if (g_rx_n >= sizeof(g_rx_buff)) {
+            g_rx_n = PACKET_INVALID;
+        } else {
+            g_rx_buff[g_rx_n++] = c;
+        }
+    }
+}
+
+const axis_t axes_init[3] = {
+    //X
+    {
+        .hstep_dly = 2000,
+        
+        .step_gpioport = GPIOA,
+        .step_gpios = GPIO0,
+
+        .dir_gpioport = GPIOA,
+        .dir_gpios = GPIO1,
+    },
+    //Y
+    {
+        .hstep_dly = 2000,
+        
+        .step_gpioport = GPIOA,
+        .step_gpios = GPIO2,
+
+        .dir_gpioport = GPIOA,
+        .dir_gpios = GPIO3,
+    },
+    //Z
+    {
+        .hstep_dly = 2000,
+        
+        .step_gpioport = GPIOA,
+        .step_gpios = GPIO4,
+
+        .dir_gpioport = GPIOA,
+        .dir_gpios = GPIO5,
+    },
+};
 
 int main(void) {
     clock_setup();
     gpio_setup();
     usart_setup();
     
-    //printf("\nHello, world!\n");
+    /*
+    DBG usart.c:381: sizeof(char): 1
+    DBG usart.c:382: sizeof(short): 2
+    DBG usart.c:383: sizeof(int): 4
+    DBG usart.c:384: sizeof(long): 4
+    */
+    /*
+    dbg("sizeof(char): %d", sizeof(char));
+    dbg("sizeof(short): %d", sizeof(short));
+    dbg("sizeof(int): %d", sizeof(int));
+    dbg("sizeof(long): %d", sizeof(long));
+    */
+    
     //no packet yet
-    g_rx_n = -1;
+    g_rx_n = 0;
+    g_escape = false;
+    g_seq_n = SEQ_NEVER;
+    for (unsigned int i = 0; i < N_AXES; ++i) {
+        axis_t *axis = &g_axes[i];        
+        *axis = axes_init[i];
+        
+        gpio_set_mode(axis->dir_gpioport, GPIO_MODE_OUTPUT_2_MHZ,
+                GPIO_CNF_OUTPUT_PUSHPULL, axis->dir_gpios);              
+        gpio_clear(axis->dir_gpioport, axis->dir_gpios);
+        gpio_set_mode(axis->step_gpioport, GPIO_MODE_OUTPUT_2_MHZ,
+                GPIO_CNF_OUTPUT_PUSHPULL, axis->step_gpios);              
+        gpio_clear(axis->step_gpioport, axis->step_gpios);
+    }
 
+    
+    
     //Blink the LED (PC9) on the board with every transmitted byte
     while (1) {
         //See if ready to receive
         //void usart_wait_recv_ready(uint32_t usart)
-	    //Wait until the data is ready to be received
-	    //while ((USART_SR(usart) & USART_SR_RXNE) == 0);
+        //Wait until the data is ready to be received
+        //while ((USART_SR(usart) & USART_SR_RXNE) == 0);
         if ((USART_SR(USART1) & USART_SR_RXNE) != 0) {
             //blue led
             gpio_toggle(GPIOC, GPIO8);
-            
-            uint16_t c = usart_recv_blocking(USART1);
-            //usart_send_blocking(USART1, c);
-            printf("Force RX: 0x%04X\n", c);
-            
+                rx_char(usart_recv_blocking(USART1));
         }
-
-        //green led
-        gpio_toggle(GPIOC, GPIO9);
-        //Wait a bit
-        for (int i = 0; i < 800000; i++)
-            __asm__("NOP");
+        
+        for (unsigned int i = 0; i < N_AXES; ++i) {
+            axis_t *axis = &g_axes[i];
+            
+            service_axis(axis);
+        }
     }
     return 0;
 }
 
-/*
-int main(void)
-{
-    int i, j = 0, c = 0;
-
-    clock_setup();
-    gpio_setup();
-    usart_setup();
-
-    //Blink the LED (PC9) on the board with every transmitted byte
-    while (1) {
-        //LED on/off
-        gpio_toggle(GPIOC, GPIO9);    
-        //USART1: Send byte
-        usart_send_blocking(USART1, c + '0');
-        //Increment c
-        c = (c == 9) ? 0 : c + 1;    
-        //Newline after line full
-        if ((j++ % 80) == 0) {        
-            usart_send_blocking(USART1, '\r');
-            usart_send_blocking(USART1, '\n');
-        }
-        //Wait a bit
-        for (i = 0; i < 800000; i++)
-            __asm__("NOP");
-    }
-
-    return 0;
-}
-*/
