@@ -175,32 +175,37 @@ uint8_t input_ring_buffer[BUFFER_SIZE];
 
 #define USART_CONSOLE       USART1
 
-/******************************************************************************
- * Simple ringbuffer implementation from open-bldc's libgovernor that
- * you can find at:
- * https://github.com/open-bldc/open-bldc/tree/master/source/libgovernor
- *****************************************************************************/
+#define XYZ_STATUS         0x00
+#define XYZ_CONTROL     0x01     
+//Set the step register to value (2's compliment)
+#define XYZ_STEP_SET     0x02
+//Adjust the step register by argument
+#define XYZ_STEP_ADD     0x03
+//Adjust the step register by argument
+//#define XYZ_STEP_ADD    0x04
+//Minimum velocity in steps/second     
+#define XYZ_VELMIN         0x05
+//Maximum velocity in steps/second
+#define XYZ_VELMAX         0x06
+//Acceleration/decceleration in steps/second**2 
+#define XYZ_ACL         0x07
+#define XYZ_HSTEP_DLY   0x08
+#define XYZ_NET_STEP    0x09
 
-typedef int32_t ring_size_t;
+//not really a register
+#define REG_NOP     0x03
+#define REG_ACK     0x02
 
-struct ring {
-	uint8_t *data;
-	ring_size_t size;
-	uint32_t begin;
-	uint32_t end;
-};
+#define REG_WRITE    0x80
 
-#define RING_SIZE(RING)  ((RING)->size - 1)
-#define RING_DATA(RING)  (RING)->data
-#define RING_EMPTY(RING) ((RING)->begin == (RING)->end)
+#define PACKET_INVALID 0xFF
 
+#define SEQ_NEVER 0x100
+unsigned int g_seq_num_rx = SEQ_NEVER;
+uint8_t g_checksum_rx;
+unsigned int g_seq = 0;
 
-static void ring_init(struct ring *ring, uint8_t *buf, ring_size_t size);
-//static int32_t ring_write_ch(struct ring *ring, uint8_t ch);
-//static int32_t ring_write(struct ring *ring, uint8_t *data, ring_size_t size);
-//static int32_t ring_read_ch(struct ring *ring, uint8_t *ch);
-//static int32_t ring_read(struct ring *ring, uint8_t *data, ring_size_t size);
-
+#include "ring.h"
 #include "ring.c"
 
 uint8_t checksum(const uint8_t *data, size_t data_size) {
@@ -413,6 +418,8 @@ void service_axis(axis_t *axis) {
         and overshoot from rotor inertia
         */
         if (axis->step == 0) {
+            dbg("Reached 0 step in loop %d, velocity %d, stepped %d", j, axis->velocity, axis->stepped);
+            axis->velocity = 0;
             break;
         }
         
@@ -525,28 +532,6 @@ void service_axis(axis_t *axis) {
     }
 }
 
-#define XYZ_STATUS         0x00
-#define XYZ_CONTROL     0x01     
-//Set the step register to value (2's compliment)
-#define XYZ_STEP_SET     0x02
-//Adjust the step register by argument
-#define XYZ_STEP_ADD     0x03
-//Adjust the step register by argument
-//#define XYZ_STEP_ADD    0x04
-//Minimum velocity in steps/second     
-#define XYZ_VELMIN         0x05
-//Maximum velocity in steps/second
-#define XYZ_VELMAX         0x06
-//Acceleration/decceleration in steps/second**2 
-#define XYZ_ACL         0x07
-#define XYZ_HSTEP_DLY   0x08
-#define XYZ_NET_STEP    0x09
-
-#define REG_WRITE    0x80
-
-#define PACKET_INVALID 0xFF
-
-unsigned int g_seq = 0;
 void packet_write(uint8_t reg, uint32_t value) {
     packet_t packet;
     uint8_t *packetb = (uint8_t *)&packet;
@@ -607,10 +592,15 @@ void axis_process_command(axis_t *axis, const packet_t *packet) {
     } else {
         //dbg("Drop packet: FIXME read not implemented, reg 0x%02X (reg 0x%02X)", reg, packet->reg);
         switch (reg) {
+        case XYZ_STEP_SET:
+            //Number of steps outstanding
+            packet_write(packet->reg, (axis->step)/MICROSTEPPING);
+            dbg("axis step read: %d", (int)axis->step);
+            break;
         case XYZ_NET_STEP:
             //Number of steps completed + outstanding
             packet_write(packet->reg, (axis->step + axis->stepped)/MICROSTEPPING);
-            dbg("axis net step read: %d", (int)axis->step);
+            dbg("axis net step read");
             break;
         default:
             dbg("Drop packet: unknown axis reg 0x%02X (reg 0x%02X)", reg, packet->reg);
@@ -629,14 +619,24 @@ void process_command(void) {
         dbg("Drop packet: checksum mismatch, got: 0x%02X, compute: 0x%02X", packet->checksum, computed_checksum);
         return;
     }
+    
     /*
     //Retransmit?
-    if (packet->seq == g_seq_num && g_seq_num != SEQ_NEVER) {
-        //TODO: send ack
+    if (packet->seq == g_seq_num_rx) {
+        if (packet->checksum != g_checksum_rx) {
+            //TODO: add flags in upper value bits
+            packet_write(REG_ACK, g_seq_num_rx);
+        } else {
+            //Don't actually execute the command, just retransmit ack
+            //TODO: add flags in upper value bits
+            packet_write(REG_ACK, g_seq_num_rx);
         return;
     }
-    g_seq_num = packet->seq;
     */
+    g_seq_num_rx = packet->seq;
+    g_checksum_rx = packet->checksum;
+    //TODO: add flags in upper value bits
+    packet_write(REG_ACK, g_seq_num_rx);
     
     //0x20         X block
     //0x40         Y block
