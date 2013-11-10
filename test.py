@@ -170,7 +170,16 @@ if __name__ == "__main__":
     # 48 => 15 = 27
     # 10000 / 27 = 370 steps/second
     # 
-    indexer.step('X', -10000)
+    indexer.step('X', 1000)
+    time.sleep(3)
+    indexer.step('X', -1000)
+    time.sleep(3)
+
+    indexer.step('Y', 1000)
+    time.sleep(3)
+    indexer.step('Y', -1000)
+    time.sleep(3)
+    
     if 0:
         for dly in (1800, 2000, 2200):
             print 'Delay %d' % dly
