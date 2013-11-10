@@ -29,6 +29,8 @@ XYZ_VELMAX =        0x06
 # Acceleration/decceleration in steps/second**2 
 XYZ_ACL =        0x07
 XYZ_HSTEP_DLY =  0x08
+XYZ_NET_STEP =   0x09
+
 
 
 def checksum(data):

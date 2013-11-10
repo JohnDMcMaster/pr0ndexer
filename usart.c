@@ -80,6 +80,16 @@ but regardless be warned...
 #define SLIP_END        192
 #define SLIP_ESC        219
 
+//Constants calculated using lowest setting of 400 steps/rev on driver
+//Microstepped to 2000
+//TODO: think out a little more whether the microstepping adjustment should be done here or on the PC
+//probably should be done on the PC
+//#define MICROSTEPPING   5
+//Higher! (10000)
+#define MICROSTEPPING   25
+
+#define VELMAX          370 * MICROSTEPPING
+
 #define BUFFER_SIZE 1024
 
 #define toggle_blue()   gpio_toggle(GPIOC, GPIO8)
@@ -98,9 +108,9 @@ typedef struct {
     /*
     High bit indicates write
     */
-    uint8_t opcode;
+    uint8_t reg;
     /*
-    Value specific to opcode
+    Value specific to reg
     Should be set to 0 if unused
     */
     uint32_t value;
@@ -126,6 +136,7 @@ typedef struct {
     Then go through high step for one cycle and then low step
     */
     int step;
+    int stepped;
     //Target half step delay
     //unsigned int hstep_dly;
     //Used to figure out acceleration
@@ -439,6 +450,8 @@ void service_axis(axis_t *axis) {
         with only 200 elements this is much faster and probably less space
         */
         
+        const int accel = 13 * MICROSTEPPING;
+        
         bool is_min_velocity = axis->velocity > -10 && axis->velocity < 10;
         //Accelerating
         if (axis->step > 0) {
@@ -448,14 +461,14 @@ void service_axis(axis_t *axis) {
             
             //axis->velocity += 13;
             //Is velocity exceeding our ability to stop?
-            if (axis->step * 13 <= axis->velocity) {
-                axis->velocity -= 13;
+            if (axis->step * accel <= axis->velocity) {
+                axis->velocity -= accel;
             } else {
-                axis->velocity += 13;
+                axis->velocity += accel;
             }
             
-            if (axis->velocity > 370) {
-                axis->velocity = 370;
+            if (axis->velocity > VELMAX) {
+                axis->velocity = VELMAX;
             }
         //Decellerating
         } else {
@@ -463,17 +476,17 @@ void service_axis(axis_t *axis) {
                 axis->velocity = -10;
             }
             
-            //axis->velocity -= 13;
+            //axis->velocity -= accel;
             //Is velocity exceeding our ability to stop?
             //note that step is negative and velocity typically is as well
-            if (axis->step * 13 >= axis->velocity) {
-                axis->velocity += 13;
+            if (axis->step * accel >= axis->velocity) {
+                axis->velocity += accel;
             } else {
-                axis->velocity -= 13;
+                axis->velocity -= accel;
             }
             
-            if (axis->velocity < -370) {
-                axis->velocity = -370;
+            if (axis->velocity < -VELMAX) {
+                axis->velocity = -VELMAX;
             }
         }
                 
@@ -499,11 +512,15 @@ void service_axis(axis_t *axis) {
             __asm__("NOP");
         }
         
-        //Register step completed
+        //Register step completed, for better or worse
+        //FIXME: really we should take in axis->velocity
+        //since the step might not have been in the right direction
         if (axis->step > 0) {
             --axis->step;
+            ++axis->stepped;
         } else {
             ++axis->step;
+            --axis->stepped;
         }
     }
 }
@@ -523,22 +540,59 @@ void service_axis(axis_t *axis) {
 //Acceleration/decceleration in steps/second**2 
 #define XYZ_ACL         0x07
 #define XYZ_HSTEP_DLY   0x08
+#define XYZ_NET_STEP    0x09
 
-#define OPCODE_WRITE    0x80
+#define REG_WRITE    0x80
 
 #define PACKET_INVALID 0xFF
 
-void axis_process_command(axis_t *axis, const packet_t *packet) {
-    uint8_t reg = packet->opcode & 0x1F;
+unsigned int g_seq = 0;
+void packet_write(uint8_t reg, uint32_t value) {
+    packet_t packet;
+    uint8_t *packetb = (uint8_t *)&packet;
+
+    packet.seq = g_seq++;
+    packet.reg = reg;
+    packet.value = value;
+    packet.checksum = checksum(packetb + 1, sizeof(packet) - 1);
+
+    ring_write_ch(&output_ring, SLIP_END);
+    for (unsigned int i = 0; i < sizeof(packet); ++i) {
+        uint8_t b = packetb[i];
+        
+        if (b == SLIP_END) {
+            //If a data byte is the same code as END character, a two byte sequence of
+            //ESC and octal 334 (decimal 220) is sent instead.  
+            ring_write_ch(&output_ring, SLIP_ESC);
+            ring_write_ch(&output_ring, 220);
+        } else if (b == SLIP_ESC) {
+            //If it the same as an ESC character, an two byte sequence of ESC and octal 335 (decimal
+            //221) is sent instead
+            ring_write_ch(&output_ring, SLIP_ESC);
+            ring_write_ch(&output_ring, 221);
+        } else {
+            ring_write_ch(&output_ring, b);
+        }
+    }
+    //When the last byte in the packet has been
+    //sent, an END character is then transmitted
+    ring_write_ch(&output_ring, SLIP_END);
     
-    if (packet->opcode & OPCODE_WRITE) {
+    //Start blasting out chars if not already doing so
+	USART_CR1(USART1) |= USART_CR1_TXEIE;
+}
+
+void axis_process_command(axis_t *axis, const packet_t *packet) {
+    uint8_t reg = packet->reg & 0x1F;
+    
+    if (packet->reg & REG_WRITE) {
         switch (reg) {
         case XYZ_STEP_SET:
-            axis->step = (int32_t)packet->value;
+            axis->step = (int32_t)packet->value * MICROSTEPPING;
             dbg("axis set step: %d", (int)axis->step);
             break;
         case XYZ_STEP_ADD:
-            axis->step += (int32_t)packet->value;
+            axis->step += (int32_t)packet->value * MICROSTEPPING;
             dbg("axis adjust step: %d", (int)axis->step);
             break;
         /*
@@ -548,10 +602,19 @@ void axis_process_command(axis_t *axis, const packet_t *packet) {
             break;
         */
         default:
-            dbg("Drop packet: unknown axis reg 0x%02X (opcode 0x%02X)", reg, packet->opcode);
+            dbg("Drop packet: unknown axis reg 0x%02X (reg 0x%02X)", reg, packet->reg);
         }
     } else {
-        dbg("Drop packet: FIXME read not implemented, reg 0x%02X (opcode 0x%02X)", reg, packet->opcode);
+        //dbg("Drop packet: FIXME read not implemented, reg 0x%02X (reg 0x%02X)", reg, packet->reg);
+        switch (reg) {
+        case XYZ_NET_STEP:
+            //Number of steps completed + outstanding
+            packet_write(packet->reg, (axis->step + axis->stepped)/MICROSTEPPING);
+            dbg("axis net step read: %d", (int)axis->step);
+            break;
+        default:
+            dbg("Drop packet: unknown axis reg 0x%02X (reg 0x%02X)", reg, packet->reg);
+        }
     }
 }
 
@@ -578,19 +641,14 @@ void process_command(void) {
     //0x20         X block
     //0x40         Y block
     //0x60         Z block
-    if ((packet->opcode & 0x60) == 0x20) {
+    if ((packet->reg & 0x60) == 0x20) {
         axis_process_command(&g_axes[0], packet);
-    } else if ((packet->opcode & 0x60) == 0x40) {
+    } else if ((packet->reg & 0x60) == 0x40) {
         axis_process_command(&g_axes[1], packet);
-    } else if ((packet->opcode & 0x60) == 0x60) {
+    } else if ((packet->reg & 0x60) == 0x60) {
         axis_process_command(&g_axes[2], packet);
     } else {
-        dbg("unrecognized block, opcode: 0x%02X", packet->opcode);
-        /*
-        switch (opcode) {
-        case OPCODE_
-        }
-        */
+        dbg("unrecognized block, reg: 0x%02X", packet->reg);
     }
 }
 
@@ -648,6 +706,9 @@ const axis_t axes_init[3] = {
     {
         //.hstep_dly = 2000,
         
+        .step = 0,
+        .stepped = 0,
+        
         .step_gpioport = GPIOA,
         .step_gpios = GPIO0,
 
@@ -658,6 +719,9 @@ const axis_t axes_init[3] = {
     {
         //.hstep_dly = 2000,
         
+        .step = 0,
+        .stepped = 0,
+        
         .step_gpioport = GPIOA,
         .step_gpios = GPIO2,
 
@@ -667,6 +731,9 @@ const axis_t axes_init[3] = {
     //Z
     {
         //.hstep_dly = 2000,
+        
+        .step = 0,
+        .stepped = 0,
         
         .step_gpioport = GPIOA,
         .step_gpios = GPIO4,
