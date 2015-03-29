@@ -15,6 +15,7 @@ start stlink: sudo st-util
     I'm using 73dccb68ed61dfe3364202dd8cd0d66bb9ec62e3
 Program to flash: make flash
 
+sudo st-util -1
 Program to RAM: make && stdl *.elf
 
 
