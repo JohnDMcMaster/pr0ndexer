@@ -1,4 +1,4 @@
-BINARY = usart
+BINARY = main
 
 LDSCRIPT = stm32vl-discovery.ld
 
