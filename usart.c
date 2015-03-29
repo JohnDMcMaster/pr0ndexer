@@ -18,6 +18,14 @@ Relavent documents:
 
 USART1 TX: PA9 
 USART1 RX: PA10
+
+X step: PA0,
+X dir:  PA1
+Y step: PA2
+Y dir:  PA3
+Z step: PA4
+Z dir:  PA5
+
 USART_CR1: RM0041 pg 611
 USART_CR2: RM0041 pg 613
 USART_CR3: RM0041 pg 614 

@@ -10,9 +10,14 @@ My actual CPU label
 	ST
 
 
+get this in your $PATH: https://launchpadlibrarian.net/151487636/gcc-arm-none-eabi-4_7-2013q3-20130916-linux.tar.bz2
+start stlink: sudo st-util
+    I'm using 73dccb68ed61dfe3364202dd8cd0d66bb9ec62e3
+Program to flash: make flash
 
 Program to RAM: make && stdl *.elf
-Program to flash: make flash
+
+
 
 
 arm-none-eabi-gcc -Os -g -Wall -Wextra -Wimplicit-function-declaration -Wredundant-decls -Wmissing-prototypes -Wstrict-prototypes -Wundef -Wshadow -I../../../../../libopencm3/include -fno-common -mthumb -mcpu=cortex-m3 -msoft-float -MD -DSTM32L1 -I../../../../../libopencm3/include -o usart.o -c usart.c
