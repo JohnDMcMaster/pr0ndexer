@@ -16,7 +16,10 @@ start stlink: sudo st-util
 
 sudo st-util -1
 Program to flash: make && stdl *.elf
-    make flash doesn't work...?
+stlink window will say
+    2015-05-22T17:20:19 INFO src/stlink-common.c: Flash written and verified! jolly good!
+gdb window will say transferred at KB/s and then freeze
+make flash doesn't work...?
 
 
 
