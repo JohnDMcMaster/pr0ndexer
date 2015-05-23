@@ -69,14 +69,14 @@ void nop_delay(unsigned hstep_dly);
 
 //In actual pulse units
 //Step acceleration per loop
-extern unsigned int g_accel;
+extern int g_accel;
 //Min velocity
-extern unsigned int g_velmin;
+extern int g_velmin;
 //Max velocity
-extern unsigned int g_velmax;
+extern int g_velmax;
 //Timing constant used to convert velocity to step widths
 //See above for details
-extern unsigned int g_hstep_c;
+extern int g_hstep_c;
 
 
 #endif

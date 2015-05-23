@@ -1,3 +1,3 @@
 all:
-	gcc -Wall -Werror main.c -o sim -Wno-sign-compare -std=gnu99 -g
+	gcc -Wall -Werror main.c -o sim -std=gnu99 -g
 

@@ -3,10 +3,10 @@
 #include <stdbool.h>
 
 //See header for details
-unsigned int g_accel = 13 * MICROSTEPPING;
-unsigned int g_velmin = 10;
-unsigned int g_velmax = 370 * MICROSTEPPING;
-unsigned int g_hstep_c = 740000;
+int g_accel = 13 * MICROSTEPPING;
+int g_velmin = 10;
+int g_velmax = 370 * MICROSTEPPING;
+int g_hstep_c = 740000;
 
 
 /*
@@ -131,16 +131,15 @@ void service_axis_loop(axis_t *axis) {
     with only 200 elements this is much faster and probably less space
     */
     
-    bool is_min_velocity = axis->velocity > -g_velmin && axis->velocity < g_velmin;
-    //Accelerating
+    //Forward direction
     if (axis->step > 0) {
-        if (is_min_velocity) {
+        if (axis->velocity <= g_velmin) {
             axis->velocity = g_velmin;
         }
         
-        //axis->velocity += 13;
         //Is velocity exceeding our ability to stop?
-        if (axis->step * g_accel <= axis->velocity) {
+        //Note g_accel**2 is more proper but g_accel is just conservative
+        if (axis->velocity >= axis->step * g_accel / 2) {
             axis->velocity -= g_accel;
         } else {
             axis->velocity += g_accel;
@@ -149,16 +148,15 @@ void service_axis_loop(axis_t *axis) {
         if (axis->velocity > g_velmax) {
             axis->velocity = g_velmax;
         }
-    //Decellerating
+    //Reverse direction
     } else {
-        if (is_min_velocity) {
+        if (axis->velocity >= -g_velmin) {
             axis->velocity = -g_velmin;
         }
         
-        //axis->velocity -= accel;
         //Is velocity exceeding our ability to stop?
-        //note that step is negative and velocity typically is as well
-        if (axis->step * g_accel >= axis->velocity) {
+        //Note g_accel**2 is more proper but g_accel is just conservative
+        if (axis->velocity <= axis->step * g_accel) {
             axis->velocity += g_accel;
         } else {
             axis->velocity -= g_accel;

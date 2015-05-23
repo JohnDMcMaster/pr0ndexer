@@ -67,11 +67,11 @@ int main(void) {
     axis_t *axis = &axes[0];
    
     g_accel = 325;
-    g_velmin = 10;
+    g_velmin = 325;
     g_velmax = 9250;
     g_hstep_c = 740000;
     
-    axis->step = -100;
+    axis->step = 100;
     
     int i = 0;
     printf("%4s %8s %8s %8s\n", "i", "step", "vel", "hstp_dly");
